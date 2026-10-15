@@ -41,6 +41,10 @@ Simulator screens are located through Device Hub's accessibility tree.
 - Simulators only; physical devices are not supported. Two fingers at most.
 - Not affiliated with or endorsed by Apple. Xcode and Device Hub are trademarks of Apple Inc.
 
+## Disclaimer
+
+Use HubTouch at your own risk. It is provided as is, with no guarantee that it works, or keeps working, reliably.
+
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
