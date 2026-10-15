@@ -43,5 +43,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --sign "$SIGN_IDENTITY" "$APP"
+# Hardened runtime blocks DYLD_* injection, so other code cannot borrow HubTouch's privacy permissions.
+codesign --options runtime --sign "$SIGN_IDENTITY" "$APP"
+codesign --options runtime --sign "$SIGN_IDENTITY" build/hubtouch
 echo "Built $APP and build/hubtouch"

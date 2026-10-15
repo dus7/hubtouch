@@ -36,6 +36,9 @@ static NSString *RunTool(NSString *executablePath, NSArray<NSString *> *argument
     NSTask *task = [NSTask new];
     task.executableURL = [NSURL fileURLWithPath:executablePath];
     task.arguments = arguments;
+    // Tools run with HubTouch's privacy permissions, so they must not be steerable through inherited variables
+    // such as DEVELOPER_DIR or DYLD_*.
+    task.environment = @{ @"HOME" : NSHomeDirectory(), @"PATH" : @"/usr/bin:/bin:/usr/sbin:/sbin" };
     NSPipe *output = [NSPipe pipe];
     task.standardOutput = output;
     task.standardError = [NSFileHandle fileHandleWithNullDevice];
@@ -53,13 +56,20 @@ static NSString *RunTool(NSString *executablePath, NSArray<NSString *> *argument
         stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
 }
 
-static NSString *RunSimctl(NSArray<NSString *> *arguments) {
-    return RunTool(@"/usr/bin/xcrun", [@[ @"simctl" ] arrayByAddingObjectsFromArray:arguments]);
+/// The Xcode selected with `xcode-select`. DEVELOPER_DIR is ignored on purpose: it would let another process choose
+/// which `simctl` runs with HubTouch's permissions.
+static NSString *ActiveDeveloperDirectory(void) {
+    static NSString *developerDirectory;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        developerDirectory = RunTool(@"/usr/bin/xcode-select", @[ @"-p" ]);
+    });
+    return developerDirectory;
 }
 
-static NSString *ActiveDeveloperDirectory(void) {
-    NSString *fromEnvironment = NSProcessInfo.processInfo.environment[@"DEVELOPER_DIR"];
-    return fromEnvironment.length > 0 ? fromEnvironment : RunTool(@"/usr/bin/xcode-select", @[ @"-p" ]);
+static NSString *RunSimctl(NSArray<NSString *> *arguments) {
+    NSString *developerDirectory = ActiveDeveloperDirectory();
+    return developerDirectory ? RunTool([developerDirectory stringByAppendingPathComponent:@"usr/bin/simctl"], arguments) : nil;
 }
 
 #pragma mark - CoreSimulator
@@ -1120,6 +1130,8 @@ static CGEventRef HandleHoverTapEvent(__unused CGEventTapProxy proxy, CGEventTyp
         needsPermission = YES;
     }
     if (needsPermission) {
+        // macOS applies Input Monitoring only to newly launched processes, so a grant needs a relaunch to take effect.
+        [menu addItem:[self itemWithTitle:@"Relaunch HubTouch" action:@selector(relaunch)]];
         [menu addItem:NSMenuItem.separatorItem];
     }
 
@@ -1189,8 +1201,27 @@ static CGEventRef HandleHoverTapEvent(__unused CGEventTapProxy proxy, CGEventTyp
 }
 
 - (void)openInputMonitoringSettings {
+    // Registers HubTouch in the Input Monitoring list (prompting the first time), so there is a switch to turn on.
+    CGRequestListenEventAccess();
     [NSWorkspace.sharedWorkspace
         openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"]];
+}
+
+- (void)relaunch {
+    [_interactiveController cancelTouch];
+    NSWorkspaceOpenConfiguration *configuration = [NSWorkspaceOpenConfiguration configuration];
+    configuration.createsNewApplicationInstance = YES;
+    [NSWorkspace.sharedWorkspace openApplicationAtURL:NSBundle.mainBundle.bundleURL
+                                        configuration:configuration
+                                    completionHandler:^(__unused NSRunningApplication *application, NSError *error) {
+                                        dispatch_async(dispatch_get_main_queue(), ^{
+                                            if (error) {
+                                                Log([NSString stringWithFormat:@"relaunch failed: %@", error]);
+                                                return;
+                                            }
+                                            [NSApp terminate:nil];
+                                        });
+                                    }];
 }
 
 - (void)quit {
