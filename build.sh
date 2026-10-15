@@ -13,7 +13,7 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 clang -fobjc-arc -Wall -Wextra -O2 -mmacosx-version-min=13.0 \
     -framework Foundation -framework AppKit -framework ApplicationServices \
-    hubtouch.m -o build/hubtouch
+    Sources/*.m -o build/hubtouch
 
 cp build/hubtouch "$APP/Contents/MacOS/HubTouch"
 # Regenerate with `swift icon/make-icon.swift` after changing the design.
