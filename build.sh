@@ -9,13 +9,15 @@ SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 APP=build/HubTouch.app
 
 rm -rf build
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 clang -fobjc-arc -Wall -Wextra -O2 -mmacosx-version-min=13.0 \
     -framework Foundation -framework AppKit -framework ApplicationServices \
     hubtouch.m -o build/hubtouch
 
 cp build/hubtouch "$APP/Contents/MacOS/HubTouch"
+# Regenerate with `swift icon/make-icon.swift` after changing the design.
+cp icon/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -23,6 +25,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
     <key>CFBundleExecutable</key>
     <string>HubTouch</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>local.hubtouch</string>
     <key>CFBundleName</key>
