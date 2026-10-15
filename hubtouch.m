@@ -695,8 +695,8 @@ static const NSTimeInterval HoverLookupIntervalSeconds = 0.05;
 /// Turns Option+drag over a simulator screen in Device Hub into two-finger touches, and handles restored shortcuts.
 @interface InteractiveController : NSObject
 - (instancetype)initWithRouter:(SimulatorRouter *)router;
-/// Called on the main thread once the event taps run, after Accessibility permission is granted.
-@property (nonatomic, copy, nullable) void (^listeningDidStart)(void);
+/// Called on the main thread when the event taps start or stop as Accessibility permission comes and goes.
+@property (nonatomic, copy, nullable) void (^listeningDidChange)(void);
 @property (nonatomic, readonly) BOOL listening;
 - (void)start;
 /// Lifts both fingers if a gesture is in progress, so the simulator is never left with a stuck touch.
@@ -757,18 +757,64 @@ static CGEventRef HandleHoverTapEvent(__unused CGEventTapProxy proxy, CGEventTyp
 - (void)start {
     [self makeOverlay];
     NSDictionary *promptOptions = @{ (__bridge NSString *)kAXTrustedCheckOptionPrompt : @YES };
-    if (AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)promptOptions)) {
+    if (!AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)promptOptions)) {
+        Log(@"waiting for Accessibility permission (System Settings > Privacy & Security > Accessibility)");
+    }
+    [self updateListeningForPermission];
+    // An active tap left running after its permission changes can stall every click and keystroke on the system,
+    // so permission changes stop or start the taps right away, with a periodic check as a backstop.
+    [NSDistributedNotificationCenter.defaultCenter addObserver:self
+                                                      selector:@selector(accessibilityPermissionMayHaveChanged)
+                                                          name:@"com.apple.accessibility.api"
+                                                        object:nil
+                                            suspensionBehavior:NSNotificationSuspensionBehaviorDeliverImmediately];
+    _permissionPollTimer = [NSTimer scheduledTimerWithTimeInterval:1
+                                                            target:self
+                                                          selector:@selector(updateListeningForPermission)
+                                                          userInfo:nil
+                                                           repeats:YES];
+}
+
+- (void)accessibilityPermissionMayHaveChanged {
+    // The trust state settles shortly after the notification is posted.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        [self updateListeningForPermission];
+    });
+}
+
+- (void)updateListeningForPermission {
+    BOOL trusted = AXIsProcessTrusted();
+    if (trusted && !self.listening) {
         [self startListening];
+    } else if (!trusted && self.listening) {
+        Log(@"Accessibility permission removed; stopping event taps");
+        [self stopListening];
+    }
+}
+
+- (void)stopListening {
+    [self cancelTouch];
+    [self hideFingers];
+    InvalidateEventTap(&_gestureTap);
+    InvalidateEventTap(&_hoverTap);
+    if (self.listeningDidChange) {
+        self.listeningDidChange();
+    }
+}
+
+static NSString *EventTapDisabledReason(CGEventType type) {
+    return type == kCGEventTapDisabledByTimeout ? @"timeout" : @"user input";
+}
+
+/// Disables and removes an event tap; invalidating its port also removes its run loop source.
+static void InvalidateEventTap(CFMachPortRef *tap) {
+    if (!*tap) {
         return;
     }
-    Log(@"waiting for Accessibility permission (System Settings > Privacy & Security > Accessibility)");
-    __weak InteractiveController *weakSelf = self;
-    _permissionPollTimer = [NSTimer scheduledTimerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer) {
-        if (AXIsProcessTrusted()) {
-            [timer invalidate];
-            [weakSelf startListening];
-        }
-    }];
+    CGEventTapEnable(*tap, false);
+    CFMachPortInvalidate(*tap);
+    CFRelease(*tap);
+    *tap = NULL;
 }
 
 - (void)startListening {
@@ -791,10 +837,12 @@ static CGEventRef HandleHoverTapEvent(__unused CGEventTapProxy proxy, CGEventTyp
                                  callback:HandleHoverTapEvent];
     if (!_gestureTap || !_hoverTap) {
         Log(@"cannot create event taps");
+        InvalidateEventTap(&_gestureTap);
+        InvalidateEventTap(&_hoverTap);
         return;
     }
-    if (self.listeningDidStart) {
-        self.listeningDidStart();
+    if (self.listeningDidChange) {
+        self.listeningDidChange();
     }
 }
 
@@ -833,7 +881,13 @@ static CGEventRef HandleHoverTapEvent(__unused CGEventTapProxy proxy, CGEventTyp
             // The gesture's remaining events were missed, so its up event will never be seen.
             _discardingCancelledDrag = _gestureSender != nil;
             [self cancelTouch];
-            CGEventTapEnable(_gestureTap, true);
+            [self hideFingers];
+            // Only a timeout is ours to undo; a tap the system disabled on purpose stays off.
+            if (type == kCGEventTapDisabledByTimeout) {
+                CGEventTapEnable(_gestureTap, true);
+            }
+            Log([NSString stringWithFormat:@"gesture tap disabled (%@); %@", EventTapDisabledReason(type),
+                                           type == kCGEventTapDisabledByTimeout ? @"re-enabled" : @"left off"]);
             return event;
         case kCGEventKeyDown:
             return [self handleKeyDown:event];
@@ -901,7 +955,12 @@ static CGEventRef HandleHoverTapEvent(__unused CGEventTapProxy proxy, CGEventTyp
     FingerPair fingers = [self fingersAtLocation:location screenRect:_gestureScreenRect];
     [_gestureSender sendFingers:fingers eventType:eventType];
     _lastFingers = fingers;
-    [self showFingers:fingers screenRect:_gestureScreenRect pressed:eventType != NSEventTypeLeftMouseUp];
+    // The hover preview shows the fingers again on the next Option move, so nothing lingers after a gesture.
+    if (eventType == NSEventTypeLeftMouseUp) {
+        [self hideFingers];
+    } else {
+        [self showFingers:fingers screenRect:_gestureScreenRect pressed:YES];
+    }
 }
 
 - (void)endTouch {
@@ -937,6 +996,9 @@ static CGEventRef HandleHoverTapEvent(__unused CGEventTapProxy proxy, CGEventTyp
 
 - (void)handleHoverEvent:(CGEventRef)event type:(CGEventType)type {
     if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        // A listen-only tap cannot hold up input, and the preview depends on it to hide the fingers.
+        Log([NSString stringWithFormat:@"hover tap disabled (%@); re-enabling", EventTapDisabledReason(type)]);
+        [self hideFingers];
         CGEventTapEnable(_hoverTap, true);
         return;
     }
@@ -1093,7 +1155,7 @@ static CGEventRef HandleHoverTapEvent(__unused CGEventTapProxy proxy, CGEventTyp
         _router = [SimulatorRouter new];
         _interactiveController = [[InteractiveController alloc] initWithRouter:_router];
         __weak StatusBarController *weakSelf = self;
-        _interactiveController.listeningDidStart = ^{
+        _interactiveController.listeningDidChange = ^{
             [weakSelf updateIcon];
         };
 
