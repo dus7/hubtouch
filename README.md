@@ -30,6 +30,33 @@ open build/HubTouch.app
 
 HubTouch lives in the menu bar. Grant it **Accessibility** in System Settings > Privacy & Security.
 
+### Keep permissions across rebuilds
+
+By default `build.sh` signs ad hoc. macOS ties privacy permissions to an ad-hoc binary's exact contents, so every
+rebuild looks like a new app and asks for Accessibility again. Signing with a stable identity avoids that:
+
+1. List the code-signing identities in your keychain:
+
+   ```
+   security find-identity -p codesigning -v
+   ```
+
+   Any valid "Apple Development" certificate works. Without one, create a self-signed certificate in
+   Keychain Access > Certificate Assistant > Create a Certificate, with Certificate Type set to "Code Signing".
+
+2. Build with that identity, using the hash or the name in quotes from the list:
+
+   ```
+   SIGN_IDENTITY=<identity> ./build.sh
+   ```
+
+   To make it the default, add `export SIGN_IDENTITY=<identity>` to your shell profile.
+
+3. Remove any older HubTouch entries from System Settings > Privacy & Security > Accessibility, then open the new
+   build and grant it once. Later rebuilds signed with the same identity keep the permission.
+
+If macOS asks whether `codesign` may use the certificate's key, choose Always Allow.
+
 ## How it works
 
 Touches are sent as `IndigoDigitizerEvent` messages to the simulator's `dtuhidd` HID service over XPC.
